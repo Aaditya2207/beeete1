@@ -1,14 +1,11 @@
-import logger from './logger.js';
-import path from 'path';
-import dotenv from 'dotenv';
-import express from 'express';
+import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { fileURLToPath } from 'url';
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
+import dotenv from 'dotenv';
+import logger from "./logger.js";
+// Load Env
+dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -18,7 +15,8 @@ app.use(cors());
 app.use(express.json());
 
 // API Key Management
-const apiKeys = (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k);
+const envKeys = process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || "";
+const apiKeys: string[] = envKeys.split(',').map(k => k.trim()).filter(k => k);
 let currentKeyIndex = 0;
 
 if (apiKeys.length === 0) {
@@ -55,11 +53,15 @@ Rules:
 5. You support ALL programming languages (Python, JavaScript, C++, etc.).
 `;
 
+interface CodeResponse {
+    code: string;
+}
+
 /**
  * Wraps raw AI text into the expected JSON format.
  * Strips markdown code blocks if present.
  */
-function formatResponse(rawText) {
+function formatResponse(rawText: string): CodeResponse {
     let clean = rawText;
     
     // Remove markdown code blocks (```language ... ```)
@@ -92,6 +94,7 @@ async function createChatSession() {
     
     return model.startChat({
         history: initialHistory,
+        // generationConfig: { maxOutputTokens: 2048 }, // Removed per previous user edit
     });
 }
 
@@ -99,9 +102,9 @@ async function createChatSession() {
  * GET /
  * Main endpoint.
  */
-app.get('/', async (req, res) => {
+app.get('/', async (req: Request, res: Response) => {
     try {
-        const query = req.query.query;
+        const query = req.query.query as string;
         
         // LOG REQUEST
         logger.info('REQUEST', { 
@@ -112,13 +115,15 @@ app.get('/', async (req, res) => {
         if (!query) {
             const err = "Missing 'query' parameter.";
             logger.warn('BAD_REQUEST', { message: err });
-            return res.status(400).json({ error: true, message: err });
+            res.status(400).json({ error: true, message: err });
+            return;
         }
         
         if (apiKeys.length === 0) {
             const err = "Server config error: No API keys.";
             logger.error('CONFIG_ERROR', { message: err });
-            return res.status(500).json({ error: true, message: err });
+            res.status(500).json({ error: true, message: err });
+            return;
         }
 
         // Stateless execution - create a fresh session for this request
@@ -127,7 +132,7 @@ app.get('/', async (req, res) => {
 
         // Retry Loop for Quota Errors
         const MAX_RETRIES = apiKeys.length * 2; 
-        let lastError = null;
+        let lastError: any = null;
 
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
             try {
@@ -140,15 +145,15 @@ app.get('/', async (req, res) => {
                 logger.info('AI_RAW_RESPONSE', { attempt, rawText: text });
 
                 // Format Response (Text -> JSON Wrapper)
-                // This eliminates "Invalid JSON" errors from the model itself
                 const finalResponse = formatResponse(text);
 
                 // LOG FINAL RESPONSE
                 logger.info('RESPONSE_SENT', finalResponse);
                 
-                return res.json(finalResponse);
+                res.json(finalResponse);
+                return;
 
-            } catch (err) {
+            } catch (err: any) {
                 lastError = err;
                 
                 const errorMsg = err.message || "";
@@ -179,9 +184,9 @@ app.get('/', async (req, res) => {
 
         throw new Error(`Failed after ${MAX_RETRIES} attempts. Last error: ${lastError ? lastError.message : 'Unknown'}`);
 
-    } catch (criticalError) {
+    } catch (criticalError: any) {
         logger.error('CRITICAL_SERVER_ERROR', { error: criticalError.message, stack: criticalError.stack });
-        return res.status(500).json({
+        res.status(500).json({
             error: true,
             message: "Internal Server Error",
             details: criticalError.message
@@ -189,5 +194,12 @@ app.get('/', async (req, res) => {
     }
 });
 
+// Start Server
+if (process.env.VITE_PUBLIC_VERCEL_ENV !== 'production') {
+    // Only listen if not in pure serverless mode (though Vercel handles listen usually, explicit listen is fine for local)
+    app.listen(port, () => {
+        console.log(`Server is running on http://localhost:${port}`);
+    });
+}
 
 export default app;
